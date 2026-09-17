@@ -1,0 +1,104 @@
+// bodecide_tests.nv — the API suite for the decision.
+//
+// RED ON PURPOSE: every assertion reaches `not implemented:
+// backoff-nv.bodecide.<fn>`.  What is asserted is that nothing is read
+// from the world — the attempt, the elapsed time, the verdict on the
+// error and the random number all arrive as arguments — and that the
+// three reasons to stop are told apart.
+
+use std.test
+use bodecide
+use bopolicy
+
+@test
+fn test_a_decision_is_a_function_of_its_four_arguments() [io]
+    let p = bopolicy.with_jitter(bopolicy.exponential(100, 2.0), BoNoJitter)
+
+    test.case("the first retry waits the base delay")
+    match bodecide.next(p, bodecide.start(), true, 0.5)
+        BoGiveUp(_)      => test.fail("a fresh policy allows a first retry")
+        BoRetryAfter(ms) => test.assert(ms == 100)
+
+    test.case("the same inputs answer the same thing, every time")
+    test.assert(bodecide.delay_of(bodecide.next(p, bodecide.start(), true, 0.5)) ==
+                bodecide.delay_of(bodecide.next(p, bodecide.start(), true, 0.5)))
+
+    test.case("the delay grows with the attempt number, and with nothing else")
+    test.assert(bodecide.base_delay(p, 1, 0) == 100)
+    test.assert(bodecide.base_delay(p, 2, 0) == 200)
+    test.assert(bodecide.base_delay(p, 3, 0) == 400)
+
+    test.case("a ceiling holds it")
+    let capped = bopolicy.with_max_delay(p, 250)
+    test.assert(bodecide.base_delay(capped, 3, 0) == 250)
+
+@test
+fn test_the_three_reasons_to_stop_are_separate() [io]
+    test.case("the caller's verdict on the error stops it first")
+    let p = bopolicy.exponential(100, 2.0)
+    match bodecide.next(p, bodecide.start(), false, 0.5)
+        BoRetryAfter(_) => test.fail("an error the caller called final is final")
+        BoGiveUp(r)     => test.assert(bodecide.reason_name(r) == "error")
+
+    test.case("the attempt limit stops it next")
+    let limited = bopolicy.with_max_attempts(p, 2)
+    let after_two = bodecide.record(bodecide.record(bodecide.start(), 100, 100), 200, 300)
+    match bodecide.next(limited, after_two, true, 0.5)
+        BoRetryAfter(_) => test.fail("two attempts is the limit")
+        BoGiveUp(r)     => test.assert(bodecide.reason_name(r) == "attempts")
+
+    test.case("and the budget stops it although attempts are left")
+    let budgeted = bopolicy.with_budget(p, 250)
+    let spent = bodecide.record(bodecide.start(), 100, 200)
+    match bodecide.next(budgeted, spent, true, 0.5)
+        BoRetryAfter(_) => test.fail("the next delay would pass the budget")
+        BoGiveUp(r)     => test.assert(bodecide.reason_name(r) == "budget")
+
+    test.case("`may_retry` asks the same two questions without the error or a random number")
+    test.assert(bodecide.may_retry(limited, bodecide.start()))
+    test.assert(bodecide.may_retry(limited, after_two) == false)
+
+    test.case("and `budget_left` is the number the budget decision used")
+    test.assert(bodecide.budget_left(budgeted, spent) == 50)
+    test.assert(bodecide.budget_left(p, spent) == 0)
+
+@test
+fn test_the_state_carries_what_the_caller_measured() [io]
+    test.case("a fresh state has made no attempt and waited no time")
+    let s0 = bodecide.start()
+    test.assert(s0.attempts == 0)
+    test.assert(s0.elapsed_millis == 0)
+    test.assert(s0.last_delay_millis == 0)
+
+    test.case("recording an attempt keeps the caller's elapsed time, not a sum")
+    let s1 = bodecide.record(s0, 250, 400)
+    test.assert(s1.attempts == 1)
+    test.assert(s1.elapsed_millis == 400)
+    test.assert(s1.last_delay_millis == 250)
+
+    test.case("a decorrelated policy grows from that last delay")
+    let d = bopolicy.decorrelated(100, 20000)
+    test.assert(bodecide.base_delay(d, 2, 1000) == 3000)
+    test.assert(bodecide.base_delay(d, 2, 10000) == 20000)
+
+@test
+fn test_jitter_spreads_a_delay_and_none_of_it_is_random_here() [io]
+    test.case("no jitter ignores the uniform entirely")
+    let plain = bopolicy.with_jitter(bopolicy.exponential(100, 2.0), BoNoJitter)
+    test.assert(bodecide.jittered_delay(plain, 3, 0, 0.0) == 400)
+    test.assert(bodecide.jittered_delay(plain, 3, 0, 0.999) == 400)
+
+    test.case("full jitter picks between zero and the computed delay")
+    let full = bopolicy.exponential(100, 2.0)
+    test.assert(bodecide.jittered_delay(full, 3, 0, 0.0) == 0)
+    test.assert(bodecide.jittered_delay(full, 3, 0, 0.5) == 200)
+
+    test.case("equal jitter keeps a floor under the wait")
+    let equal = bopolicy.with_jitter(full, BoEqualJitter)
+    test.assert(bodecide.jittered_delay(equal, 3, 0, 0.0) == 200)
+    test.assert(bodecide.jittered_delay(equal, 3, 0, 0.5) == 300)
+
+    test.case("a decision that says stop carries no delay")
+    test.assert(bodecide.is_retry(BoRetryAfter(250)))
+    test.assert(bodecide.is_retry(BoGiveUp(BoErrorNotRetryable)) == false)
+    test.assert(bodecide.delay_of(BoGiveUp(BoBudgetExhausted)) == 0)

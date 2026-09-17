@@ -1,0 +1,245 @@
+// bopolicy.nv — a retry policy as a value.
+//
+// WHAT A RETRY POLICY IS
+//
+// A client that fails and retries immediately turns one failure into
+// many.  A thousand clients that all retry after exactly one second
+// turn a recovering service into a service that is hit by a thousand
+// requests one second later — a thundering herd.  A retry policy is
+// the pair of decisions that prevents both: how long to wait before
+// the next attempt, and when to stop.
+//
+// THE FOUR SHAPES
+//
+// A CONSTANT policy waits the same time every attempt.  A LINEAR one
+// adds a fixed step each time.  An EXPONENTIAL one multiplies by a
+// factor, which is what almost every client should use.  A
+// DECORRELATED one grows from the LAST delay it produced rather than
+// from the attempt number, which spreads a herd out fastest; it is the
+// form the AWS Architecture Blog's "Exponential Backoff and Jitter"
+// recommends, and it needs a ceiling.
+//
+// JITTER IS NOT AN EXTRA
+//
+// A policy with no jitter puts every client that failed at the same
+// moment back on the wire at the same moment.  `BoFullJitter` picks
+// uniformly between zero and the computed delay, which is the form
+// that measures best.  A policy is built with jitter and
+// `BoNoJitter` is the deliberate exception, for a test that wants one
+// answer.
+
+use bofault
+
+// How a computed delay is spread out.
+//
+// ```novo
+// use bopolicy
+//
+// fn main() [io]
+//     println(bopolicy.jitter_name(BoFullJitter))   // full
+// ```
+pub enum BoJitter
+    // None.  Every client waits exactly the computed delay, so every
+    // client that failed together retries together.  For a test, or
+    // for a single client where a herd cannot form.
+    BoNoJitter
+    // Uniformly between zero and the computed delay.  The form that
+    // clears a herd fastest, at the cost of some very short waits.
+    BoFullJitter
+    // Half the computed delay, plus uniformly up to the other half.
+    // Keeps a floor under every wait, which matters when the retry
+    // itself is expensive.
+    BoEqualJitter
+    // Uniformly between the base delay and three times the LAST delay,
+    // capped at the maximum.  Grows from the previous wait rather than
+    // from the attempt number, so a client that has already backed off
+    // a long way does not restart from the bottom.
+    BoDecorrelatedJitter
+
+// A retry policy.
+//
+// Built by `constant`, `linear`, `exponential` or `decorrelated` and
+// narrowed by the `with_` functions.  The fields are readable so a
+// test can assert on them and a start-up log can print them.
+pub struct BoPolicy
+    // The first delay, in milliseconds.  Every shape starts here.
+    base_millis: Int
+    // What a linear policy adds each attempt, in milliseconds.  `0`
+    // for the other shapes.
+    step_millis: Int
+    // What an exponential policy multiplies by each attempt.  `1.0`
+    // for the other shapes.
+    factor: Float
+    // The ceiling on one delay, in milliseconds, or `0` for none.
+    max_millis: Int
+    // The most attempts, the first one included, or `0` for no limit.
+    max_attempts: Int
+    // The most time the whole sequence may span, in milliseconds, or
+    // `0` for no budget.  Measured from the first attempt, and it is
+    // what stops a policy with a long ceiling from retrying for an
+    // hour.
+    budget_millis: Int
+    // How the computed delay is spread out.
+    jitter: BoJitter
+
+// The jitter's stable name: `"none"`, `"full"`, `"equal"`,
+// `"decorrelated"`.
+//
+// ```novo
+// use bopolicy
+//
+// fn main() [io]
+//     println(bopolicy.jitter_name(BoEqualJitter))  // equal
+// ```
+pub fn jitter_name(j: BoJitter) -> Str
+    todo("backoff-nv.bopolicy.jitter_name")
+
+// A policy that waits the same time every attempt.
+//
+// For a dependency whose recovery time is known and does not depend on
+// load — a lock, a leader election, a file a process is writing.
+//
+// ```novo
+// use bopolicy
+//
+// fn main() [io]
+//     let p = bopolicy.constant(250)
+//     println("${p.base_millis}")                   // 250
+// ```
+pub fn constant(millis: Int) -> BoPolicy
+    todo("backoff-nv.bopolicy.constant")
+
+// A policy that adds `step` milliseconds each attempt.
+//
+// ```novo
+// use bopolicy
+//
+// fn main() [io]
+//     let p = bopolicy.linear(100, 100)
+//     println("${p.step_millis}")                   // 100
+// ```
+pub fn linear(base_millis: Int, step_millis: Int) -> BoPolicy
+    todo("backoff-nv.bopolicy.linear")
+
+// A policy that multiplies by `factor` each attempt, with full jitter.
+//
+// The default every client should start from.  `exponential(100, 2.0)`
+// computes 100, 200, 400, 800 milliseconds and spreads each one
+// uniformly between zero and itself.
+//
+// ```novo
+// use bopolicy
+//
+// fn main() [io]
+//     let p = bopolicy.exponential(100, 2.0)
+//     println(bopolicy.jitter_name(p.jitter))       // full
+// ```
+pub fn exponential(base_millis: Int, factor: Float) -> BoPolicy
+    todo("backoff-nv.bopolicy.exponential")
+
+// A policy that grows from the last delay rather than from the attempt
+// number, capped at `max_millis`.
+//
+// Each delay is uniform between the base and three times the previous
+// delay.  The ceiling is required, not optional: without one the
+// sequence has no bound.
+//
+// ```novo
+// use bopolicy
+//
+// fn main() [io]
+//     let p = bopolicy.decorrelated(100, 20000)
+//     println("${p.max_millis}")                    // 20000
+// ```
+pub fn decorrelated(base_millis: Int, max_millis: Int) -> BoPolicy
+    todo("backoff-nv.bopolicy.decorrelated")
+
+// The policy with a ceiling on one delay.
+//
+// ```novo
+// use bopolicy
+//
+// fn main() [io]
+//     let p = bopolicy.with_max_delay(bopolicy.exponential(100, 2.0), 30000)
+//     println("${p.max_millis}")                    // 30000
+// ```
+pub fn with_max_delay(p: BoPolicy, millis: Int) -> BoPolicy
+    todo("backoff-nv.bopolicy.with_max_delay")
+
+// The policy with a limit on the number of attempts, the first
+// included.
+//
+// `with_max_attempts(p, 3)` allows one attempt and two retries.
+//
+// ```novo
+// use bopolicy
+//
+// fn main() [io]
+//     let p = bopolicy.with_max_attempts(bopolicy.exponential(100, 2.0), 3)
+//     println("${p.max_attempts}")                  // 3
+// ```
+pub fn with_max_attempts(p: BoPolicy, attempts: Int) -> BoPolicy
+    todo("backoff-nv.bopolicy.with_max_attempts")
+
+// The policy with a total time budget in milliseconds.
+//
+// The budget is what a caller with a deadline actually has: a request
+// that must answer in two seconds cannot spend thirty retrying, however
+// many attempts its policy allows.  The decision is taken against the
+// elapsed time the caller reports, so this package still reads no
+// clock.
+//
+// ```novo
+// use bopolicy
+//
+// fn main() [io]
+//     let p = bopolicy.with_budget(bopolicy.exponential(100, 2.0), 5000)
+//     println("${p.budget_millis}")                 // 5000
+// ```
+pub fn with_budget(p: BoPolicy, millis: Int) -> BoPolicy
+    todo("backoff-nv.bopolicy.with_budget")
+
+// The policy with a different jitter.
+//
+// ```novo
+// use bopolicy
+//
+// fn main() [io]
+//     let p = bopolicy.with_jitter(bopolicy.exponential(100, 2.0), BoNoJitter)
+//     println(bopolicy.jitter_name(p.jitter))       // none
+// ```
+pub fn with_jitter(p: BoPolicy, j: BoJitter) -> BoPolicy
+    todo("backoff-nv.bopolicy.with_jitter")
+
+// Whether the policy is usable, and the first fault if it is not.
+//
+// Run it at start-up.  Every fault it finds is decided by lines that
+// run once, and left to run time each of them looks like a network
+// problem rather than like a configuration mistake.
+//
+// ```novo
+// use bopolicy
+//
+// fn main() [io]
+//     match bopolicy.check(bopolicy.constant(0))
+//         Some(f) => println(f.message())
+//         None    => println("usable")
+// ```
+pub fn check(p: BoPolicy) -> ?bofault.BoFault
+    todo("backoff-nv.bopolicy.check")
+
+// How many uniform random numbers one decision needs.
+//
+// `0` for `BoNoJitter` and `1` for the other three.  A caller draws
+// exactly this many and hands them in, which is what keeps the
+// randomness outside this package and makes every decision here
+// reproducible from the numbers it was given.
+//
+// ```novo
+// use bopolicy
+//
+// fn main() [io]
+//     println("${bopolicy.uniforms_needed(bopolicy.exponential(100, 2.0))}")   // 1
+// ```
+pub fn uniforms_needed(p: BoPolicy) -> Int
+    todo("backoff-nv.bopolicy.uniforms_needed")

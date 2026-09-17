@@ -1,0 +1,66 @@
+// bofault.nv — the ways a retry policy can be unusable.
+//
+// A POLICY IS CHECKED WHERE IT IS BUILT, NOT WHERE IT IS USED
+//
+// Every fault here is a fault in the POLICY: a base delay of zero, a
+// growth factor that does not grow, a ceiling below the floor.  Each
+// one is decided by a line that runs once, usually at start-up, and
+// none of them depends on what happened to a request.
+//
+// A policy that is wrong this way does not fail loudly at run time.  It
+// retries instantly forever, or gives up on the first attempt, or waits
+// the same wrong interval every time — and all three look like a
+// network problem from the outside.  `bopolicy.check` is what turns
+// them into a start-up error that names the field.
+
+// Why a policy is unusable.
+//
+// ```novo
+// use bofault
+//
+// fn main() [io]
+//     println(bofault.code(BoBaseDelayNotPositive(0)))
+// ```
+pub enum BoFault
+    // The base delay is zero or negative.  A retry policy whose first
+    // delay is zero is a loop that hammers a failing service as fast
+    // as the machine can send.
+    BoBaseDelayNotPositive(millis: Int)
+    // An exponential policy's growth factor is at most one, so the
+    // delay never grows.  Written where a constant policy was meant.
+    BoFactorNotGreaterThanOne(factor: Float)
+    // The maximum delay is below the base delay, so the ceiling holds
+    // every attempt at the ceiling and the policy is a constant one.
+    BoMaxDelayBelowBase(max_millis: Int, base_millis: Int)
+    // The attempt limit is negative.  Zero means no limit, and a
+    // negative number means nothing.
+    BoAttemptLimitNegative(attempts: Int)
+    // The total budget is smaller than the first delay, so the policy
+    // gives up before it ever waits.
+    BoBudgetBelowFirstDelay(budget_millis: Int, first_millis: Int)
+    // A decorrelated-jitter policy has no maximum delay.  The
+    // decorrelated form grows from the LAST delay rather than from the
+    // attempt number, and without a ceiling it has no bound at all.
+    BoDecorrelatedNeedsMaxDelay
+
+// `BoFault` is an `Error`, which is what lets `Result<T, BoFault>`
+// exist at all.
+impl Error for BoFault
+    // The one-line message, naming the field and the number written in
+    // it.
+    //
+    // Panics with `not implemented` until the bodies land.
+    fn message(self) -> Str
+        todo("backoff-nv.BoFault.message")
+
+// A short stable code for a log: `"base_delay_not_positive"`,
+// `"factor_not_greater_than_one"`, and so on.
+//
+// ```novo
+// use bofault
+//
+// fn main() [io]
+//     println(bofault.code(BoDecorrelatedNeedsMaxDelay))
+// ```
+pub fn code(f: BoFault) -> Str
+    todo("backoff-nv.bofault.code")

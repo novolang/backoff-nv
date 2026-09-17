@@ -1,0 +1,108 @@
+// bosched.nv — the whole sequence a policy would produce.
+//
+// WHY A SCHEDULE IS PUBLISHED
+//
+// A retry policy is four or five numbers, and what those numbers DO is
+// hard to see from them: `exponential(100, 2.0)` with a ceiling of 30
+// seconds and a budget of one minute gives up after nine attempts, and
+// nobody can read that off the constructor.  A schedule is the policy
+// written out — the delays in order, their total, and where it stops —
+// and it is what a test asserts on, what a start-up log prints, and
+// what a reviewer reads instead of doing the arithmetic.
+//
+// THE UNIFORMS COME IN
+//
+// A jittered policy needs one random number per delay, so a schedule
+// takes the list.  A caller that wants the shape without the noise
+// passes a policy with `BoNoJitter`; a test that wants the worst case
+// passes a list of `0.999`.
+
+use bopolicy
+
+// Every delay a policy would produce, in order, in milliseconds.
+//
+// One uniform is consumed per delay; the list ends when the uniforms
+// run out, when the attempt limit is reached, or when the next delay
+// would pass the budget.  Nothing here has anything to do with an
+// error: this is what the policy would do if every attempt failed.
+//
+// ```novo
+// use bosched
+// use bopolicy
+//
+// fn main() [io]
+//     let p = bopolicy.with_jitter(
+//                 bopolicy.with_max_attempts(bopolicy.exponential(100, 2.0), 4),
+//                 BoNoJitter)
+//     println("${list.len(bosched.delays(p, [0.5, 0.5, 0.5]))}")    // 3
+// ```
+pub fn delays(p: bopolicy.BoPolicy, uniforms: [Float]) -> [Int]
+    todo("backoff-nv.bosched.delays")
+
+// What those delays add up to, in milliseconds.
+//
+// The time a caller spends waiting if every attempt fails, which is
+// the number a deadline has to be compared against.
+//
+// ```novo
+// use bosched
+// use bopolicy
+//
+// fn main() [io]
+//     let p = bopolicy.with_jitter(
+//                 bopolicy.with_max_attempts(bopolicy.constant(100), 4), BoNoJitter)
+//     println("${bosched.total_delay(p, [0.5, 0.5, 0.5])}")         // 300
+// ```
+pub fn total_delay(p: bopolicy.BoPolicy, uniforms: [Float]) -> Int
+    todo("backoff-nv.bosched.total_delay")
+
+// How many attempts the policy allows, counting the first.
+//
+// `0` when neither an attempt limit nor a budget bounds it, which is a
+// policy that retries forever — a legitimate choice for a background
+// worker and a mistake in a request path, and this is the call that
+// makes the difference visible.
+//
+// ```novo
+// use bosched
+// use bopolicy
+//
+// fn main() [io]
+//     println("${bosched.attempt_bound(bopolicy.constant(100))}")   // 0
+// ```
+pub fn attempt_bound(p: bopolicy.BoPolicy) -> Int
+    todo("backoff-nv.bosched.attempt_bound")
+
+// The schedule as one line, for a start-up log.
+//
+// `exponential 100ms x2.0, full jitter, max 30000ms, 5 attempts,
+// budget 60000ms`.  The shape a reviewer can check without reading the
+// code that built it.
+//
+// ```novo
+// use bosched
+// use bopolicy
+//
+// fn main() [io]
+//     println(bosched.describe(bopolicy.exponential(100, 2.0)))
+// ```
+pub fn describe(p: bopolicy.BoPolicy) -> Str
+    todo("backoff-nv.bosched.describe")
+
+// The longest the sequence can run, in milliseconds, or `0` when it is
+// unbounded.
+//
+// The budget when there is one.  Otherwise the sum of the largest
+// delay each attempt can produce, which for a jittered policy is the
+// unjittered delay.
+//
+// ```novo
+// use bosched
+// use bopolicy
+//
+// fn main() [io]
+//     let p = bopolicy.with_budget(bopolicy.exponential(100, 2.0), 5000)
+//     println("${bosched.worst_case_millis(p)}")                    // 5000
+// ```
+pub fn worst_case_millis(p: bopolicy.BoPolicy) -> Int
+    todo("backoff-nv.bosched.worst_case_millis")

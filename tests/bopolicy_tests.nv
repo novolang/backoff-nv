@@ -1,0 +1,113 @@
+// bopolicy_tests.nv — the API suite for the policy value and the
+// schedule it implies.
+//
+// RED ON PURPOSE: every assertion reaches `not implemented:
+// backoff-nv.bopolicy.<fn>` or `…bosched.<fn>`.  What is asserted is
+// that every shape is checked where it is built, and that what a
+// policy DOES is readable without doing the arithmetic.
+
+use std.test
+use bopolicy
+use bosched
+use bofault
+
+@test
+fn test_the_four_shapes_and_what_each_one_carries() [io]
+    test.case("a constant policy waits the same time every attempt")
+    let c = bopolicy.constant(250)
+    test.assert(c.base_millis == 250)
+    test.assert(c.step_millis == 0)
+    test.assert(bopolicy.jitter_name(c.jitter) == "none")
+
+    test.case("a linear policy adds a step")
+    let l = bopolicy.linear(100, 100)
+    test.assert(l.step_millis == 100)
+
+    test.case("an exponential policy multiplies, and comes with full jitter")
+    let e = bopolicy.exponential(100, 2.0)
+    test.assert(e.factor == 2.0)
+    test.assert(bopolicy.jitter_name(e.jitter) == "full")
+
+    test.case("a decorrelated policy requires the ceiling it grows towards")
+    let d = bopolicy.decorrelated(100, 20000)
+    test.assert(d.max_millis == 20000)
+    test.assert(bopolicy.jitter_name(d.jitter) == "decorrelated")
+
+    test.case("and the narrowing functions each set one field")
+    let full = bopolicy.with_budget(
+                   bopolicy.with_max_attempts(
+                       bopolicy.with_max_delay(e, 30000), 5),
+                       60000)
+    test.assert(full.max_millis == 30000)
+    test.assert(full.max_attempts == 5)
+    test.assert(full.budget_millis == 60000)
+    test.assert(bopolicy.jitter_name(bopolicy.with_jitter(e, BoEqualJitter).jitter) == "equal")
+
+@test
+fn test_an_unusable_policy_says_so_where_it_is_built() [io]
+    test.case("a base delay of zero is a loop, not a policy")
+    match bopolicy.check(bopolicy.constant(0))
+        None    => test.fail("a first delay of zero hammers a failing service")
+        Some(f) => test.assert(bofault.code(f) == "base_delay_not_positive")
+
+    test.case("a growth factor of one does not grow")
+    match bopolicy.check(bopolicy.exponential(100, 1.0))
+        None    => test.fail("`exponential` with a factor of 1.0 is a constant policy")
+        Some(f) => test.assert(bofault.code(f) == "factor_not_greater_than_one")
+
+    test.case("a ceiling below the floor holds every attempt at the ceiling")
+    match bopolicy.check(bopolicy.with_max_delay(bopolicy.exponential(1000, 2.0), 100))
+        None    => test.fail("a maximum below the base is a mistake, not a constant policy")
+        Some(f) => test.assert(bofault.code(f) == "max_delay_below_base")
+
+    test.case("a budget smaller than the first delay gives up before it waits")
+    match bopolicy.check(bopolicy.with_budget(bopolicy.exponential(1000, 2.0), 100))
+        None    => test.fail("this policy can never wait")
+        Some(f) => test.assert(bofault.code(f) == "budget_below_first_delay")
+
+    test.case("and a well-formed policy says nothing")
+    match bopolicy.check(bopolicy.exponential(100, 2.0))
+        Some(f) => test.fail("this policy is usable: ${f.message()}")
+        None    => test.assert(true)
+
+    test.case("a negative attempt limit means nothing — zero is the way to say `no limit`")
+    match bopolicy.check(bopolicy.with_max_attempts(bopolicy.constant(100), -1))
+        None    => test.fail("a negative attempt limit is a mistake")
+        Some(f) => test.assert(bofault.code(f) == "attempt_limit_negative")
+
+@test
+fn test_the_randomness_stays_outside_this_package() [io]
+    test.case("a jittered policy needs one uniform per decision")
+    test.assert(bopolicy.uniforms_needed(bopolicy.exponential(100, 2.0)) == 1)
+    test.assert(bopolicy.uniforms_needed(bopolicy.decorrelated(100, 20000)) == 1)
+
+    test.case("an unjittered one needs none, which is what makes a test deterministic")
+    test.assert(bopolicy.uniforms_needed(bopolicy.constant(250)) == 0)
+
+@test
+fn test_a_schedule_is_the_policy_written_out() [io]
+    let p = bopolicy.with_jitter(
+                bopolicy.with_max_attempts(bopolicy.exponential(100, 2.0), 4), BoNoJitter)
+
+    test.case("three retries after the first attempt, doubling")
+    test.assert(bosched.delays(p, [0.5, 0.5, 0.5]) == [100, 200, 400])
+
+    test.case("which is the time a caller spends waiting if everything fails")
+    test.assert(bosched.total_delay(p, [0.5, 0.5, 0.5]) == 700)
+
+    test.case("the attempt bound is readable without the arithmetic")
+    test.assert(bosched.attempt_bound(p) == 4)
+
+    test.case("and a policy with neither limit nor budget is unbounded, visibly")
+    test.assert(bosched.attempt_bound(bopolicy.constant(100)) == 0)
+    test.assert(bosched.worst_case_millis(bopolicy.constant(100)) == 0)
+
+    test.case("a budget is the worst case when there is one")
+    test.assert(bosched.worst_case_millis(
+        bopolicy.with_budget(bopolicy.exponential(100, 2.0), 5000)) == 5000)
+
+    test.case("and the one-line description is what a start-up log prints")
+    test.assert(bosched.describe(bopolicy.constant(250)) != "")
+
+    test.case("the schedule ends when the uniforms run out")
+    test.assert(list.len(bosched.delays(p, [0.5])) == 1)

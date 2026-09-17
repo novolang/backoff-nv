@@ -1,0 +1,37 @@
+[package]
+name        = "backoff-nv"
+version     = "0.0.1"
+description = "Retry policies as values — constant, linear, exponential and decorrelated, with full and equal jitter, an attempt limit and a total time budget — that answer the NEXT delay from the attempt count, the elapsed time and the uniform random numbers the caller hands in.  Nothing here sleeps, and nothing here decides whether an error is worth retrying."
+license     = "Apache-2.0"
+
+# An INTERFACE release: every `pub fn` body is a `todo()`, so the
+# signatures and the effect rows are published and nothing is
+# implemented.  `novo pkg publish` recognises the shape and requires
+# both the draft stability and the 0.0.x version; the first
+# implementation is the 0.1.0 published over it.
+stability   = "draft"
+
+# `core`.  A backoff library that slept would need `[time]`, and one
+# that drew its own random numbers would need `[rand]`; this one does
+# neither.  The elapsed time is what the caller measured and the
+# uniforms are what the caller drew, so every decision is a pure
+# function of its arguments and a failure log replays exactly.
+layer       = "core"
+
+category    = "tooling"
+
+tags        = ["backoff", "retry", "jitter", "exponential-backoff", "resilience", "tooling"]
+repository  = "https://github.com/novolang/backoff-nv"
+maintainers = ["novo-lang"]
+novo        = ">= 0.9.0"
+
+# A library: no `main`, so `novo pkg build` type-checks and
+# effect-checks every module under `src/` and writes no binary.
+
+[docs.pages]
+"README.md" = "Retry policies as values that answer the next delay and never sleep"
+
+[dependencies]
+# None.  A delay is arithmetic over the policy's numbers, and the
+# randomness arrives as a parameter rather than from a generator this
+# package would have to choose.
