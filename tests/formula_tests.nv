@@ -1,0 +1,158 @@
+// formula_tests.nv — the delay formulas, checked over seeded uniforms.
+//
+// The expected delays are computed here from the definitions and not
+// from the package: the shapes from the README's table, and the jitter
+// forms from the AWS Architecture Blog's "Exponential Backoff and
+// Jitter", which states them as
+//
+//   full:          sleep = random_between(0, min(cap, base * 2 ** attempt))
+//   equal:         temp  = min(cap, base * 2 ** attempt)
+//                  sleep = temp / 2 + random_between(0, temp / 2)
+//   decorrelated:  sleep = min(cap, random_between(base, sleep * 3))
+//
+// The blog counts attempts from zero and this package from one, so the
+// blog's `2 ** attempt` is `2 ** (n - 1)` here.  The uniforms come from
+// a linear congruential generator with a fixed seed, so a failure
+// names the case that failed and reruns identically.
+
+use std.test
+use bodecide
+use bopolicy
+use bosched
+
+// The next state of the generator: the constants of the C standard's
+// example `rand`, modulo 2^31.
+fn step(state: Int) -> Int
+    (state * 1103515245 + 12345) % 2147483648
+
+// The uniform in `0.0 ..< 1.0` a generator state stands for.
+fn uniform_of(state: Int) -> Float
+    int.to_float(state) / 2147483648.0
+
+// `base * 2 ** (n - 1)`, held by `cap`, in integers.
+fn doubled(base: Int, n: Int, cap: Int) -> Int
+    var d = base
+    for _ in 1..n
+        d = d * 2
+        if d >= cap
+            return cap
+    if d > cap
+        return cap
+    d
+
+fn floor_of(x: Float) -> Int
+    float.to_int(x)
+
+@test
+fn test_full_jitter_is_uniform_between_zero_and_the_capped_delay() [io]
+    let base = 100
+    let cap = 30000
+    let p = bopolicy.with_max_delay(bopolicy.exponential(base, 2.0), cap)
+    var state = 20260927
+    test.case("400 seeded cases over attempts 1 to 20")
+    for i in 0..400
+        state = step(state)
+        let u = uniform_of(state)
+        let n = 1 + i % 20
+        let temp = doubled(base, n, cap)
+        test.assert(bodecide.base_delay(p, n, 0) == temp)
+        test.assert(bodecide.jittered_delay(p, n, 0, u) == floor_of(u * int.to_float(temp)))
+
+@test
+fn test_equal_jitter_is_half_the_delay_plus_up_to_the_other_half() [io]
+    let base = 50
+    let cap = 10000
+    let p = bopolicy.with_jitter(bopolicy.with_max_delay(bopolicy.exponential(base, 2.0), cap), BoEqualJitter)
+    var state = 7
+    test.case("400 seeded cases over attempts 1 to 12")
+    for i in 0..400
+        state = step(state)
+        let u = uniform_of(state)
+        let n = 1 + i % 12
+        let temp = doubled(base, n, cap)
+        let got = bodecide.jittered_delay(p, n, 0, u)
+        test.assert(got == temp / 2 + floor_of(u * int.to_float(temp - temp / 2)))
+        test.assert(got >= temp / 2 and got <= temp)
+
+@test
+fn test_decorrelated_jitter_grows_from_the_last_sleep() [io]
+    let base = 100
+    let cap = 20000
+    let p = bopolicy.decorrelated(base, cap)
+    var state = 99
+    var sleep = base
+    var last = 0
+    test.case("a run of 300 decisions follows the blog's recurrence")
+    for i in 0..300
+        state = step(state)
+        let u = uniform_of(state)
+        let hi = if sleep * 3 < cap
+            sleep * 3
+        else
+            cap
+        let expected = base + floor_of(u * int.to_float(hi - base))
+        let got = bodecide.jittered_delay(p, i + 1, last, u)
+        test.assert(got == expected)
+        test.assert(got >= base and got <= cap)
+        sleep = got
+        last = got
+
+@test
+fn test_the_shapes_follow_the_readme_table() [io]
+    test.case("constant is the base delay at every attempt")
+    let c = bopolicy.constant(250)
+    for n in 1..30
+        test.assert(bodecide.base_delay(c, n, 0) == 250)
+
+    test.case("linear adds the step once per attempt after the first")
+    let l = bopolicy.linear(100, 40)
+    for n in 1..30
+        test.assert(bodecide.base_delay(l, n, 0) == 100 + 40 * (n - 1))
+
+    test.case("exponential multiplies by the factor, and a factor of 3 is not a doubling")
+    let e = bopolicy.exponential(10, 3.0)
+    var expected = 10
+    for n in 1..15
+        test.assert(bodecide.base_delay(e, n, 0) == expected)
+        expected = expected * 3
+
+    test.case("a delay far past any ceiling saturates rather than overflowing")
+    test.assert(bodecide.base_delay(e, 200, 0) == 1000000000000000)
+    test.assert(bodecide.base_delay(bopolicy.with_max_delay(e, 5000), 200, 0) == 5000)
+
+    test.case("an attempt number below one is read as the first attempt")
+    test.assert(bodecide.base_delay(e, 0, 0) == 10)
+
+    test.case("a uniform outside 0 to 1 is read as the nearer end")
+    let full = bopolicy.exponential(100, 2.0)
+    test.assert(bodecide.jittered_delay(full, 3, 0, -0.5) == 0)
+    test.assert(bodecide.jittered_delay(full, 3, 0, 7.0) == 400)
+
+@test
+fn test_a_schedule_agrees_with_the_decisions_it_is_made_of() [io]
+    let p = bopolicy.with_budget(bopolicy.with_max_attempts(bopolicy.with_max_delay(bopolicy.exponential(100, 2.0), 3000), 12),
+        9000)
+    var state = 4242
+    var uniforms: [Float] = []
+    for _ in 0..20
+        state = step(state)
+        list.push(uniforms, uniform_of(state))
+    let got = bosched.delays(p, uniforms)
+
+    test.case("at most one delay per retry the attempt limit allows")
+    test.assert(list.len(got) <= 11)
+
+    test.case("the total is the sum, and it stays inside the budget")
+    test.assert(bosched.total_delay(p, uniforms) == list.sum(got))
+    test.assert(list.sum(got) <= 9000)
+
+    test.case("each delay is what the decision for that state answers")
+    var s = bodecide.start()
+    var i = 0
+    for ms in got
+        test.assert(bodecide.delay_of(bodecide.next(p, s, true, uniforms[i])) == ms)
+        s = bodecide.record(s, ms, s.elapsed_millis + ms)
+        i = i + 1
+
+    test.case("and the worst case bounds every schedule")
+    test.assert(bosched.worst_case_millis(p) >= list.sum(got))
