@@ -1,22 +1,22 @@
 // bosched.nv — the whole sequence a policy would produce.
 //
-// WHY A SCHEDULE IS PUBLISHED
-//
-// A retry policy is four or five numbers, and what those numbers DO is
+// A retry policy is a handful of numbers, and what those numbers do is
 // hard to see from them: `exponential(100, 2.0)` with a ceiling of 30
 // seconds and a budget of one minute gives up after nine attempts, and
 // nobody can read that off the constructor.  A schedule is the policy
-// written out — the delays in order, their total, and where it stops —
-// and it is what a test asserts on, what a start-up log prints, and
-// what a reviewer reads instead of doing the arithmetic.
-//
-// THE UNIFORMS COME IN
+// written out: the delays in order, their total, and where it stops.
+// A test asserts on it, a start-up log prints it, and a reviewer reads
+// it instead of doing the arithmetic.
 //
 // A jittered policy needs one random number per delay, so a schedule
-// takes the list.  A caller that wants the shape without the noise
-// passes a policy with `BoNoJitter`; a test that wants the worst case
-// passes a list of `0.999`.
+// takes a list of them.  A caller that wants the shape without the
+// noise passes a policy with `BoNoJitter`, and a test that wants the
+// longest waits passes a list of `0.999`.
+//
+// A schedule assumes each attempt fails at once, so the elapsed time
+// is the sum of the delays waited so far.
 
+use bodecide
 use bopolicy
 
 // Every delay a policy would produce, in order, in milliseconds.
@@ -37,7 +37,16 @@ use bopolicy
 //     println("${list.len(bosched.delays(p, [0.5, 0.5, 0.5]))}")    // 3
 // ```
 pub fn delays(p: bopolicy.BoPolicy, uniforms: [Float]) -> [Int]
-    todo("backoff-nv.bosched.delays")
+    var out: [Int] = []
+    var s = bodecide.start()
+    for u in uniforms
+        match bodecide.next(p, s, true, u)
+            BoRetryAfter(ms) =>
+                list.push(out, ms)
+                s = bodecide.record(s, ms, s.elapsed_millis + ms)
+            BoGiveUp(_)      =>
+                return out
+    out
 
 // What those delays add up to, in milliseconds.
 //
@@ -54,14 +63,15 @@ pub fn delays(p: bopolicy.BoPolicy, uniforms: [Float]) -> [Int]
 //     println("${bosched.total_delay(p, [0.5, 0.5, 0.5])}")         // 300
 // ```
 pub fn total_delay(p: bopolicy.BoPolicy, uniforms: [Float]) -> Int
-    todo("backoff-nv.bosched.total_delay")
+    list.sum(delays(p, uniforms))
 
 // How many attempts the policy allows, counting the first.
 //
-// `0` when neither an attempt limit nor a budget bounds it, which is a
-// policy that retries forever — a legitimate choice for a background
-// worker and a mistake in a request path, and this is the call that
-// makes the difference visible.
+// The attempt limit, or `0` when the policy has none.  A budget bounds
+// the time a sequence spans and not the number of attempts, because a
+// jittered delay can be zero.  A policy with neither retries forever:
+// a reasonable choice for a background worker and a mistake in a
+// request path.
 //
 // ```novo
 // use bosched
@@ -71,13 +81,13 @@ pub fn total_delay(p: bopolicy.BoPolicy, uniforms: [Float]) -> Int
 //     println("${bosched.attempt_bound(bopolicy.constant(100))}")   // 0
 // ```
 pub fn attempt_bound(p: bopolicy.BoPolicy) -> Int
-    todo("backoff-nv.bosched.attempt_bound")
+    larger(p.max_attempts, 0)
 
 // The schedule as one line, for a start-up log.
 //
-// `exponential 100ms x2.0, full jitter, max 30000ms, 5 attempts,
-// budget 60000ms`.  The shape a reviewer can check without reading the
-// code that built it.
+// `exponential 100ms x2, full jitter, max 30000ms, 5 attempts,
+// budget 60000ms`.  A policy with neither an attempt limit nor a budget
+// ends with `unbounded`.
 //
 // ```novo
 // use bosched
@@ -87,14 +97,24 @@ pub fn attempt_bound(p: bopolicy.BoPolicy) -> Int
 //     println(bosched.describe(bopolicy.exponential(100, 2.0)))
 // ```
 pub fn describe(p: bopolicy.BoPolicy) -> Str
-    todo("backoff-nv.bosched.describe")
+    var parts = [growth(p), jitter_text(p.jitter)]
+    if p.max_millis > 0
+        list.push(parts, "max ${p.max_millis}ms")
+    if p.max_attempts > 0
+        list.push(parts, "${p.max_attempts} attempts")
+    if p.budget_millis > 0
+        list.push(parts, "budget ${p.budget_millis}ms")
+    if p.max_attempts <= 0 and p.budget_millis <= 0
+        list.push(parts, "unbounded")
+    str.join(parts, ", ")
 
 // The longest the sequence can run, in milliseconds, or `0` when it is
 // unbounded.
 //
-// The budget when there is one.  Otherwise the sum of the largest
-// delay each attempt can produce, which for a jittered policy is the
-// unjittered delay.
+// With an attempt limit, the sum of the largest delay each retry can
+// produce, which for a jittered policy is the computed delay, held by
+// the budget when there is one.  Without an attempt limit, the budget,
+// which is `0` when there is none.
 //
 // ```novo
 // use bosched
@@ -105,4 +125,32 @@ pub fn describe(p: bopolicy.BoPolicy) -> Str
 //     println("${bosched.worst_case_millis(p)}")                    // 5000
 // ```
 pub fn worst_case_millis(p: bopolicy.BoPolicy) -> Int
-    todo("backoff-nv.bosched.worst_case_millis")
+    if p.max_attempts <= 0
+        return larger(p.budget_millis, 0)
+    var total = 0
+    var last = 0
+    for attempt in 1..p.max_attempts
+        last = bodecide.base_delay(p, attempt, last)
+        total = total + last
+    if p.budget_millis > 0 and p.budget_millis < total
+        return p.budget_millis
+    total
+
+// The shape with its numbers: `constant 250ms`, `linear 100ms +50ms`,
+// `exponential 100ms x2`, `decorrelated 100ms`.
+fn growth(p: bopolicy.BoPolicy) -> Str
+    let head = "${bopolicy.shape_name(p.shape)} ${p.base_millis}ms"
+    match p.shape
+        BoLinear      => "${head} +${p.step_millis}ms"
+        BoExponential => "${head} x${p.factor}"
+        _             => head
+
+fn jitter_text(j: bopolicy.BoJitter) -> Str
+    match j
+        BoNoJitter => "no jitter"
+        _          => "${bopolicy.jitter_name(j)} jitter"
+
+fn larger(a: Int, b: Int) -> Int
+    if a > b
+        return a
+    b

@@ -1,10 +1,4 @@
 // bodecide_tests.nv — the API suite for the decision.
-//
-// RED ON PURPOSE: every assertion reaches `not implemented:
-// backoff-nv.bodecide.<fn>`.  What is asserted is that nothing is read
-// from the world — the attempt, the elapsed time, the verdict on the
-// error and the random number all arrive as arguments — and that the
-// three reasons to stop are told apart.
 
 use std.test
 use bodecide
@@ -102,3 +96,29 @@ fn test_jitter_spreads_a_delay_and_none_of_it_is_random_here() [io]
     test.assert(bodecide.is_retry(BoRetryAfter(250)))
     test.assert(bodecide.is_retry(BoGiveUp(BoErrorNotRetryable)) == false)
     test.assert(bodecide.delay_of(BoGiveUp(BoBudgetExhausted)) == 0)
+
+@test
+fn test_may_retry_is_true_exactly_when_some_uniform_would_retry() [io]
+    let p = bopolicy.with_budget(bopolicy.with_jitter(bopolicy.exponential(100, 2.0), BoEqualJitter), 1000)
+    let s = bodecide.record(bodecide.start(), 100, 880)
+
+    test.case("the shortest equal-jitter wait still fits the budget")
+    test.assert(bodecide.may_retry(p, s))
+    test.assert(bodecide.is_retry(bodecide.next(p, s, true, 0.0)))
+
+    test.case("and when even that would pass it, no uniform helps")
+    let later = bodecide.record(bodecide.start(), 100, 950)
+    test.assert(bodecide.may_retry(p, later) == false)
+    test.assert(bodecide.is_retry(bodecide.next(p, later, true, 0.0)) == false)
+
+    test.case("a reason for a log, free of the error itself")
+    test.assert(bodecide.reason_name(BoErrorNotRetryable) == "error")
+
+@test
+fn test_decorrelated_jitter_on_a_constant_policy_is_the_base_delay() [io]
+    // The jitter spans the base delay to the computed delay, and for a
+    // constant policy those are the same number.
+    let p = bopolicy.with_jitter(bopolicy.constant(100), BoDecorrelatedJitter)
+    test.case("every uniform answers the base delay")
+    test.assert(bodecide.jittered_delay(p, 4, 0, 0.0) == 100)
+    test.assert(bodecide.jittered_delay(p, 4, 0, 0.9) == 100)

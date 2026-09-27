@@ -1,30 +1,27 @@
-// bodecide.nv — the decision, and nothing else.
+// bodecide.nv — the decision after a failed attempt.
 //
-// THIS PACKAGE DOES NOT SLEEP
+// Every function here answers how long to wait, and none of them
+// waits.  Sleeping is an effect and this package declares none.  The
+// caller that has a timer owns the pause: an async runtime suspends a
+// task, a blocking client sleeps a thread, an embedded program sets a
+// hardware timer, and a test advances a number.
 //
-// Every function here answers how long to wait.  None of them waits.
-// Sleeping is an effect, this package declares none, and the caller
-// that has a timer is the one that should own the pause anyway — an
-// async runtime suspends a task, a blocking client sleeps a thread, an
-// embedded program sets a hardware timer, and a test advances a number.
+// A decision is made from what the caller supplies: the state it
+// carries between attempts, its verdict on the error, and one uniform
+// random number when the policy has jitter.  Nothing is read from the
+// world, so the same inputs always produce the same decision, and a
+// replay of a failure log produces the delays that happened.
 //
-// WHAT A DECISION IS MADE FROM
+// Whether an error is worth retrying is a question about that error: a
+// 503 is, a 400 is not, a parse failure never is.  The caller answers
+// it with a `Bool`.  This package owns the other two reasons to stop,
+// the attempt limit and the time budget.
 //
-// Three things, all supplied by the caller: which attempt has just
-// failed, how long the whole sequence has taken so far, and whether the
-// error is worth retrying.  A uniform random number comes in beside
-// them when the policy has jitter.  Nothing is read from the world, so
-// the same four inputs always produce the same decision — a replay of a
-// failure log produces exactly the delays that happened.
-//
-// THE GIVE-UP PREDICATE IS THE CALLER'S
-//
-// Whether a particular error is worth retrying is a question about that
-// error — a 503 is, a 400 is not, a parse failure never is — and this
-// package has no view of it.  The caller answers it and passes a
-// `Bool`.  What this package owns is the other three reasons to stop:
-// the attempt limit, the time budget, and a policy that cannot produce
-// another delay.
+// The sequence a caller runs is: make an attempt; when it fails, call
+// `next` with the current state; wait the delay it answers; call
+// `record` with that delay and the elapsed time; and try again.  The
+// attempt that has just failed is therefore attempt number
+// `attempts + 1` when `next` is called.
 
 use bopolicy
 
@@ -40,9 +37,9 @@ pub enum BoGiveUpReason
     // The policy's attempt limit was reached.
     BoAttemptsExhausted
     // The next delay would take the sequence past its time budget.
-    // Waiting anyway would break a caller's deadline, and waiting a
-    // shorter time would retry into a service that has had less time
-    // than the policy asked for.
+    // Waiting anyway would break a caller's deadline, and waiting less
+    // would retry into a service that has had less time than the
+    // policy asked for.
     BoBudgetExhausted
     // The caller said this error is not worth retrying.
     BoErrorNotRetryable
@@ -64,10 +61,11 @@ pub enum BoDecision
 // Where a retry sequence has got to.
 //
 // The caller keeps one of these across attempts and updates it with
-// `bodecide.record`.  It carries no clock: `elapsed_millis` is what the
-// caller measured.
+// `bodecide.record` after each wait.  It carries no clock:
+// `elapsed_millis` is what the caller measured.
 pub struct BoState
-    // How many attempts have been made, the first one included.
+    // How many failed attempts have been recorded.  The attempt a
+    // decision is about is the one after these.
     attempts: Int
     // How long since the first attempt started, in milliseconds, as
     // the caller measured it.
@@ -88,7 +86,10 @@ pub struct BoState
 //     println(bodecide.reason_name(BoBudgetExhausted))      // budget
 // ```
 pub fn reason_name(r: BoGiveUpReason) -> Str
-    todo("backoff-nv.bodecide.reason_name")
+    match r
+        BoAttemptsExhausted => "attempts"
+        BoBudgetExhausted   => "budget"
+        BoErrorNotRetryable => "error"
 
 // Whether a decision is to retry.
 //
@@ -99,7 +100,9 @@ pub fn reason_name(r: BoGiveUpReason) -> Str
 //     println("${bodecide.is_retry(BoGiveUp(BoAttemptsExhausted))}")    // false
 // ```
 pub fn is_retry(d: BoDecision) -> Bool
-    todo("backoff-nv.bodecide.is_retry")
+    match d
+        BoRetryAfter(_) => true
+        BoGiveUp(_)     => false
 
 // The delay a decision carries, or `0` when it is to give up.
 //
@@ -110,7 +113,9 @@ pub fn is_retry(d: BoDecision) -> Bool
 //     println("${bodecide.delay_of(BoRetryAfter(250))}")    // 250
 // ```
 pub fn delay_of(d: BoDecision) -> Int
-    todo("backoff-nv.bodecide.delay_of")
+    match d
+        BoRetryAfter(ms) => ms
+        BoGiveUp(_)      => 0
 
 // The state before the first attempt.
 //
@@ -121,7 +126,7 @@ pub fn delay_of(d: BoDecision) -> Int
 //     println("${bodecide.start().attempts}")               // 0
 // ```
 pub fn start() -> BoState
-    todo("backoff-nv.bodecide.start")
+    BoState { attempts: 0, elapsed_millis: 0, last_delay_millis: 0 }
 
 // The state after one more attempt that failed and was followed by a
 // wait of `delay_millis`.
@@ -138,7 +143,9 @@ pub fn start() -> BoState
 //     println("${s.attempts}")                              // 1
 // ```
 pub fn record(s: BoState, delay_millis: Int, elapsed_millis: Int) -> BoState
-    todo("backoff-nv.bodecide.record")
+    BoState { attempts: s.attempts + 1,
+        elapsed_millis: elapsed_millis,
+        last_delay_millis: delay_millis }
 
 // What to do after an attempt failed.
 //
@@ -146,6 +153,12 @@ pub fn record(s: BoState, delay_millis: Int, elapsed_millis: Int) -> BoState
 // number in `0.0 ..< 1.0` which is ignored when the policy has no
 // jitter.  The answer is the whole decision: a delay, or a reason to
 // stop.
+//
+// The reasons are checked in order.  The caller's verdict comes first.
+// The attempt limit stops the sequence when the attempt that failed,
+// number `s.attempts + 1`, is the last one allowed.  The budget stops
+// it when the recorded elapsed time plus the jittered delay would pass
+// the budget.
 //
 // ```novo
 // use bodecide
@@ -158,14 +171,28 @@ pub fn record(s: BoState, delay_millis: Int, elapsed_millis: Int) -> BoState
 //         BoGiveUp(r)      => println("stop: ${bodecide.reason_name(r)}")
 // ```
 pub fn next(p: bopolicy.BoPolicy, s: BoState, retryable: Bool, uniform: Float) -> BoDecision
-    todo("backoff-nv.bodecide.next")
+    if not retryable
+        return BoGiveUp(BoErrorNotRetryable)
+    if not attempts_left(p, s)
+        return BoGiveUp(BoAttemptsExhausted)
+    let delay = jittered_delay(p, s.attempts + 1, s.last_delay_millis, uniform)
+    if not fits_budget(p, s, delay)
+        return BoGiveUp(BoBudgetExhausted)
+    BoRetryAfter(delay)
 
 // The delay the policy computes before jitter is applied.
 //
-// A pure function of the policy, the attempt number and the last
-// delay, with the ceiling applied.  Published because it is what a
-// test asserts on and what a log should print beside the jittered
-// number: "backing off 3200 ms, waiting 1870".
+// A function of the policy, the attempt number and the last delay,
+// with the ceiling applied.  Attempt `1` is the first attempt; a
+// number below it is read as `1`.  A test asserts on this number, and
+// a log prints it beside the jittered one: "backing off 3200 ms,
+// waiting 1870".
+//
+// Constant is the base delay.  Linear adds the step `attempt - 1`
+// times.  Exponential multiplies by the factor `attempt - 1` times.
+// Decorrelated is three times the last delay, or three times the base
+// delay when the last delay is smaller than the base.  A delay
+// saturates at 10^15 milliseconds.
 //
 // ```novo
 // use bodecide
@@ -175,13 +202,27 @@ pub fn next(p: bopolicy.BoPolicy, s: BoState, retryable: Bool, uniform: Float) -
 //     println("${bodecide.base_delay(bopolicy.exponential(100, 2.0), 3, 0)}")   // 400
 // ```
 pub fn base_delay(p: bopolicy.BoPolicy, attempt: Int, last_delay_millis: Int) -> Int
-    todo("backoff-nv.bodecide.base_delay")
+    let n = larger(attempt, 1)
+    let base = int.to_float(p.base_millis)
+    let raw = match p.shape
+        BoConstant     => base
+        BoLinear       => base + int.to_float(p.step_millis) * int.to_float(n - 1)
+        BoExponential  => base * power(p.factor, n - 1)
+        BoDecorrelated => 3.0 * int.to_float(larger(last_delay_millis, p.base_millis))
+    capped(p, raw)
 
 // The delay with the policy's jitter applied to it.
 //
-// `uniform` is a random number in `0.0 ..< 1.0`.  With `BoNoJitter`
-// the answer is `base_delay` and `uniform` is ignored, which is what
-// makes a test able to pass any number.
+// `uniform` is a random number in `0.0 ..< 1.0`; a number outside that
+// range is read as the nearer end.  With computed delay `d`, the answer
+// rounds down:
+//
+// | Jitter | Answer |
+// | --- | --- |
+// | `BoNoJitter` | `d`, and `uniform` is ignored |
+// | `BoFullJitter` | `uniform * d` |
+// | `BoEqualJitter` | `d / 2 + uniform * (d - d / 2)` |
+// | `BoDecorrelatedJitter` | `b + uniform * (d - b)`, with `b` the base delay |
 //
 // ```novo
 // use bodecide
@@ -193,13 +234,21 @@ pub fn base_delay(p: bopolicy.BoPolicy, attempt: Int, last_delay_millis: Int) ->
 // ```
 pub fn jittered_delay(p: bopolicy.BoPolicy, attempt: Int, last_delay_millis: Int,
                       uniform: Float) -> Int
-    todo("backoff-nv.bodecide.jittered_delay")
+    let computed = base_delay(p, attempt, last_delay_millis)
+    let u = unit(uniform)
+    match p.jitter
+        BoNoJitter           => computed
+        BoFullJitter         => spread(0, computed, u)
+        BoEqualJitter        => spread(computed / 2, computed, u)
+        BoDecorrelatedJitter => spread(smaller(p.base_millis, computed), computed, u)
 
 // Whether the policy would allow another attempt at all, ignoring the
 // error.
 //
-// The attempt limit and the budget, asked without a random number.
-// What a caller checks before doing the work of classifying an error.
+// The attempt limit and the budget, asked without a random number:
+// true exactly when some uniform would let `next` retry an error the
+// caller calls retryable.  A caller checks it before doing the work of
+// classifying an error.
 //
 // ```novo
 // use bodecide
@@ -210,13 +259,14 @@ pub fn jittered_delay(p: bopolicy.BoPolicy, attempt: Int, last_delay_millis: Int
 //     println("${bodecide.may_retry(p, bodecide.record(bodecide.start(), 0, 0))}")
 // ```
 pub fn may_retry(p: bopolicy.BoPolicy, s: BoState) -> Bool
-    todo("backoff-nv.bodecide.may_retry")
+    let shortest = jittered_delay(p, s.attempts + 1, s.last_delay_millis, 0.0)
+    attempts_left(p, s) and fits_budget(p, s, shortest)
 
 // How much of the time budget is left, in milliseconds.
 //
-// The budget minus the elapsed time, floored at zero, and the budget
-// itself when the policy has none — a caller that wants to print "12 s
-// left of 30" needs the same number this package decides with.
+// The budget minus the elapsed time, floored at zero, and `0` when the
+// policy has no budget.  A caller printing "12 s left of 30" needs the
+// same number this package decides with.
 //
 // ```novo
 // use bodecide
@@ -227,4 +277,65 @@ pub fn may_retry(p: bopolicy.BoPolicy, s: BoState) -> Bool
 //     println("${bodecide.budget_left(p, bodecide.record(bodecide.start(), 100, 1000))}")
 // ```
 pub fn budget_left(p: bopolicy.BoPolicy, s: BoState) -> Int
-    todo("backoff-nv.bodecide.budget_left")
+    if p.budget_millis <= 0
+        return p.budget_millis
+    larger(p.budget_millis - s.elapsed_millis, 0)
+
+// The largest delay any computation answers, in milliseconds: about
+// thirty thousand years, and far inside the range of an `Int`.
+const LONGEST: Int = 1000000000000000
+
+// Whether the attempt that has just failed, number `s.attempts + 1`,
+// leaves another one under the policy's limit.
+fn attempts_left(p: bopolicy.BoPolicy, s: BoState) -> Bool
+    p.max_attempts <= 0 or s.attempts + 1 < p.max_attempts
+
+// Whether waiting `delay` more keeps the sequence inside its budget.
+fn fits_budget(p: bopolicy.BoPolicy, s: BoState, delay: Int) -> Bool
+    p.budget_millis <= 0 or s.elapsed_millis + delay <= p.budget_millis
+
+// A delay computed as a `Float`, held by the policy's ceiling and by
+// `LONGEST`, and rounded down.
+fn capped(p: bopolicy.BoPolicy, raw: Float) -> Int
+    if p.max_millis > 0 and raw > int.to_float(p.max_millis)
+        return p.max_millis
+    if raw > int.to_float(LONGEST)
+        return LONGEST
+    float.to_int(raw)
+
+// `f` to the power `k`, by repeated squaring.  The loop runs once per
+// bit of `k`, and stops early once the answer is past `LONGEST`.
+fn power(f: Float, k: Int) -> Float
+    var result = 1.0
+    var square = f
+    var rest = k
+    for _ in 0..64
+        if rest <= 0 or result > int.to_float(LONGEST)
+            break
+        if rest % 2 == 1
+            result = result * square
+        square = square * square
+        rest = rest / 2
+    result
+
+// The point `u` of the way from `lo` to `hi`, rounded down.
+fn spread(lo: Int, hi: Int, u: Float) -> Int
+    lo + float.to_int(u * int.to_float(hi - lo))
+
+// `u` held inside `0.0 ..= 1.0`.
+fn unit(u: Float) -> Float
+    if u < 0.0
+        return 0.0
+    if u > 1.0
+        return 1.0
+    u
+
+fn larger(a: Int, b: Int) -> Int
+    if a > b
+        return a
+    b
+
+fn smaller(a: Int, b: Int) -> Int
+    if a < b
+        return a
+    b

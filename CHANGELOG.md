@@ -5,6 +5,41 @@ All notable changes to backoff-nv are recorded here. The format is
 package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with the pre-1.0 rule that a breaking change bumps the MINOR number.
 
+## [0.1.0] — 2026-09-27
+
+The first implementation of the interface published as 0.0.1.
+
+### Changed
+
+- `BoPolicy` has a `shape` field of the new type `bopolicy.BoShape`,
+  and `bopolicy.shape_name` names it.  In 0.0.1 a constant policy and
+  an exponential policy with a factor of 1.0 had the same fields, so
+  `bopolicy.check` could not refuse the second without refusing the
+  first.  Code that builds a `BoPolicy` literal names the field.
+- `BoDecorrelatedJitter` spans the base delay to the computed delay.
+  With the decorrelated shape, whose computed delay is three times the
+  last delay, that is the definition 0.0.1 gave.
+- `bosched.attempt_bound` is the attempt limit, and `0` without one,
+  whether or not the policy has a budget.  A budget bounds time and not
+  the count, because a jittered delay can be zero.
+- `bosched.worst_case_millis` with both an attempt limit and a budget
+  is the smaller of the two bounds.
+- `bodecide.budget_left` answers `0` for a policy without a budget,
+  which is the budget field's value.  The field documentation of
+  `BoState.attempts` says what the count is: the failed attempts
+  recorded so far.
+- The README no longer says the package builds for a microcontroller.
+  The policy, the state and the decision are heap values, and a device
+  build admits none.
+
+### Added
+
+- `tests/formula_tests.nv`, which checks the shapes and the full, equal
+  and decorrelated jitter formulas of the AWS article over seeded
+  uniforms.
+- `tests/coverage.sh`, which merges the suites' line coverage over
+  `src/`.
+
 ## [0.0.1] — 2026-09-17
 
 **The interface, published before anyone implements it.** Every public

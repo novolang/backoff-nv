@@ -12,12 +12,6 @@ Blog's
 [Exponential Backoff and Jitter](https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/),
 which is where the jitter forms below were measured.
 
-**Status: NOT IMPLEMENTED — interface only.** Every function is
-declared with its full signature, but every body is a `todo()` that
-panics when called. The package is published so its design can be
-reviewed and depended on before it is implemented. Version 0.1.0 will
-be the first working release.
-
 ## What a retry policy is
 
 A retry policy answers two questions: how long to wait before the next
@@ -31,6 +25,7 @@ from the number of attempts already made.
 | Exponential | Base multiplied by a factor per attempt | Almost every network client |
 | Decorrelated | Between the base and three times the *last* delay | Many clients that must spread out fast |
 
+The delay for attempt *n* before any jitter is the **computed delay**.
 Exponential backoff alone still has every client retrying at the same
 moment, because every client computes the same delay. Jitter is what
 breaks that up, and it is a property of the policy rather than an
@@ -41,7 +36,7 @@ extra.
 | None | Exactly the computed delay |
 | Full | Uniformly between zero and the computed delay |
 | Equal | Half the computed delay, plus uniformly up to the other half |
-| Decorrelated | Uniformly between the base and three times the last delay |
+| Decorrelated | Uniformly between the base delay and the computed delay |
 
 Stopping has three reasons. The **attempt limit** counts tries. The
 **budget** limits the total time the sequence may span, which is what a
@@ -88,11 +83,6 @@ fn main() [io]
         BoGiveUp(reason) => println("stop: ${bodecide.reason_name(reason)}")
 ```
 
-Build and test with `novo pkg build` and `novo test`. Today `novo test`
-fails on purpose: every test reaches a
-`not implemented: backoff-nv.<module>.<fn>` panic. The tests are the
-specification the implementation will have to satisfy.
-
 ## What the package contains
 
 | Module | Contents |
@@ -106,7 +96,10 @@ specification the implementation will have to satisfy.
 
 **`bodecide.next` is the one call a retry loop makes.** It takes the
 policy, the state, the caller's verdict on the error and a random
-number, and answers either a delay or a reason to stop.
+number, and answers either a delay or a reason to stop. The loop is:
+make an attempt; when it fails, call `next`; wait the delay it
+answers; call `bodecide.record` with that delay and the elapsed time;
+try again.
 
 **`bodecide.may_retry` asks only the policy's half** — the attempt
 limit and the budget — without a random number or a verdict. Use it
@@ -140,7 +133,8 @@ decided by a line that runs once.
    expensive.
 7. **A decorrelated policy needs a maximum delay**, because it grows
    from the last delay rather than from the attempt number and has no
-   bound without one. `bopolicy.check` refuses one without.
+   bound without one. `bopolicy.check` refuses one without. Its first
+   delay is between the base and three times the base.
 8. **Cap the delay.** Without `with_max_delay`, an exponential policy's
    tenth attempt waits minutes.
 9. **A budget is not an attempt limit.** Five attempts with a ceiling
@@ -151,21 +145,14 @@ decided by a line that runs once.
     `with_max_attempts(p, 3)` allows one attempt and two retries.
 11. **A policy with no attempt limit and no budget retries forever.**
     That is a reasonable choice for a background worker and a mistake
-    in a request path. `bosched.attempt_bound` answers `0` for it.
+    in a request path. `bosched.describe` ends with `unbounded` for it.
+    A budget alone bounds the time and not the count, because a
+    jittered delay can be zero, so `bosched.attempt_bound` answers `0`
+    for any policy without an attempt limit.
 12. **Check the policy at start-up.** A base delay of zero, a factor
     that does not grow, a ceiling below the floor: each of them looks
     like a network problem at run time, and like a named field in
     `bopolicy.check`.
-
-## Running on a microcontroller
-
-Every module in this package builds for a microcontroller: no function
-performs any input or output, reads a clock or draws a random number. A
-device retrying a radio transmission computes its delay here and arms
-its own timer with the answer.
-
-The arithmetic is integer milliseconds throughout, except the growth
-factor, which is a `Float`.
 
 ## What is not included
 
@@ -179,6 +166,9 @@ factor, which is a `Float`.
 - **A circuit breaker.** A breaker is shared state across calls, with a
   half-open probe of its own. It is a neighbouring package rather than
   a field on a policy.
+- **A build for a microcontroller.** Every function is free of input
+  and output, clocks and random numbers, but the policy, the state and
+  the decision are heap values, and a device build admits none.
 - **Rate limiting.** Backoff decides when to retry after a failure;
   a rate limiter decides whether an action may happen at all. See
   ratelimit-nv.
@@ -198,6 +188,8 @@ factor, which is a `Float`.
 ```bash
 novo test tests/bodecide_tests.nv    # the decision, the state and the jitter
 novo test tests/bopolicy_tests.nv    # the four shapes, the check and the schedule
+novo test tests/formula_tests.nv     # the formulas over seeded uniforms
+bash tests/coverage.sh               # line coverage over src/
 ```
 
 The reference implementations are `backoff` and `tenacity`, whose
@@ -210,24 +202,11 @@ that a decorrelated policy grows from the last delay, that full jitter
 spans zero to the computed delay while equal jitter keeps a floor, and
 that an unusable policy is refused where it is built.
 
-The tests compile today and fail at run, each on the
-`not implemented: backoff-nv.<module>.<fn>` panic that is its body.
-That is the expected state of an interface release. They turn green one
-at a time as bodies land.
-
-## Implementation status
-
-| Item | Implemented |
-| --- | --- |
-| `bofault.BoFault`, `bopolicy.BoPolicy`, `.BoJitter`, `bodecide.BoDecision`, `.BoState` | the types are declared |
-| `bofault.code`, `BoFault.message` | no |
-| `bopolicy.constant`, `.linear`, `.exponential`, `.decorrelated` | no |
-| `bopolicy.with_max_delay`, `.with_max_attempts`, `.with_budget`, `.with_jitter` | no |
-| `bopolicy.check`, `.jitter_name`, `.uniforms_needed` | no |
-| `bodecide.next`, `.may_retry`, `.budget_left` | no |
-| `bodecide.base_delay`, `.jittered_delay` | no |
-| `bodecide.start`, `.record`, `.is_retry`, `.delay_of`, `.reason_name` | no |
-| `bosched.delays`, `.total_delay`, `.attempt_bound`, `.describe`, `.worst_case_millis` | no |
+`tests/formula_tests.nv` computes the expected delays from the
+definitions rather than from the package: the shapes from the table
+above, and full, equal and decorrelated jitter from the formulas the
+AWS article states. The uniforms come from a linear congruential
+generator with a fixed seed.
 
 ## Licence
 

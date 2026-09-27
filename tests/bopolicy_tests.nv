@@ -1,10 +1,5 @@
 // bopolicy_tests.nv — the API suite for the policy value and the
 // schedule it implies.
-//
-// RED ON PURPOSE: every assertion reaches `not implemented:
-// backoff-nv.bopolicy.<fn>` or `…bosched.<fn>`.  What is asserted is
-// that every shape is checked where it is built, and that what a
-// policy DOES is readable without doing the arithmetic.
 
 use std.test
 use bopolicy
@@ -111,3 +106,50 @@ fn test_a_schedule_is_the_policy_written_out() [io]
 
     test.case("the schedule ends when the uniforms run out")
     test.assert(list.len(bosched.delays(p, [0.5])) == 1)
+
+@test
+fn test_every_fault_has_a_code_and_a_message() [io]
+    test.case("a decorrelated policy without a ceiling has no bound")
+    match bopolicy.check(bopolicy.decorrelated(100, 0))
+        None    => test.fail("a decorrelated policy needs a maximum delay")
+        Some(f) =>
+            test.assert(bofault.code(f) == "decorrelated_needs_max_delay")
+            test.assert(str.len(f.message()) > 0)
+
+    test.case("each message names the number that was written")
+    test.assert(str.contains(BoBaseDelayNotPositive(-5).message(), "-5"))
+    test.assert(str.contains(BoFactorNotGreaterThanOne(0.5).message(), "0.5"))
+    test.assert(str.contains(BoMaxDelayBelowBase(10, 99).message(), "99"))
+    test.assert(str.contains(BoAttemptLimitNegative(-2).message(), "-2"))
+    test.assert(str.contains(BoBudgetBelowFirstDelay(7, 1000).message(), "1000"))
+
+@test
+fn test_the_shape_is_part_of_the_policy() [io]
+    test.case("each constructor names its shape")
+    test.assert(bopolicy.shape_name(bopolicy.constant(1).shape) == "constant")
+    test.assert(bopolicy.shape_name(bopolicy.linear(1, 1).shape) == "linear")
+    test.assert(bopolicy.shape_name(bopolicy.exponential(1, 2.0).shape) == "exponential")
+    test.assert(bopolicy.shape_name(bopolicy.decorrelated(1, 10).shape) == "decorrelated")
+
+    test.case("so a constant policy with a factor of one is not refused as an exponential one")
+    match bopolicy.check(bopolicy.constant(100))
+        Some(f) => test.fail(f.message())
+        None    => test.assert(true)
+
+@test
+fn test_the_description_names_every_field_that_is_set() [io]
+    test.case("an exponential policy with every limit")
+    let p = bopolicy.with_budget(bopolicy.with_max_attempts(bopolicy.with_max_delay(bopolicy.exponential(100, 2.0), 30000), 5),
+        60000)
+    test.assert(bosched.describe(p) == "exponential 100ms x2, full jitter, max 30000ms, 5 attempts, budget 60000ms")
+
+    test.case("a policy with neither limit says it is unbounded")
+    test.assert(bosched.describe(bopolicy.linear(100, 50)) == "linear 100ms +50ms, no jitter, unbounded")
+    test.assert(bosched.describe(bopolicy.decorrelated(100, 2000)) == "decorrelated 100ms, decorrelated jitter, max 2000ms, unbounded")
+
+    test.case("the worst case of a limited policy is the sum of its largest delays")
+    let limited = bopolicy.with_max_attempts(bopolicy.with_max_delay(bopolicy.exponential(100, 2.0), 300), 4)
+    test.assert(bosched.worst_case_millis(limited) == 100 + 200 + 300)
+
+    test.case("held by the budget when that is smaller")
+    test.assert(bosched.worst_case_millis(bopolicy.with_budget(limited, 250)) == 250)

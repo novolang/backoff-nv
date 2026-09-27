@@ -1,17 +1,15 @@
 // bofault.nv — the ways a retry policy can be unusable.
 //
-// A POLICY IS CHECKED WHERE IT IS BUILT, NOT WHERE IT IS USED
-//
-// Every fault here is a fault in the POLICY: a base delay of zero, a
+// Every fault here is a fault in the policy: a base delay of zero, a
 // growth factor that does not grow, a ceiling below the floor.  Each
-// one is decided by a line that runs once, usually at start-up, and
-// none of them depends on what happened to a request.
+// is decided once, where the policy is built, and none depends on what
+// happened to a request.
 //
-// A policy that is wrong this way does not fail loudly at run time.  It
-// retries instantly forever, or gives up on the first attempt, or waits
-// the same wrong interval every time — and all three look like a
-// network problem from the outside.  `bopolicy.check` is what turns
-// them into a start-up error that names the field.
+// A policy that is wrong in one of these ways does not fail at run
+// time.  It retries instantly, or gives up on the first attempt, or
+// waits the same wrong interval every time, and each of those looks
+// like a network problem from outside.  `bopolicy.check` reports them
+// at start-up instead, naming the field.
 
 // Why a policy is unusable.
 //
@@ -38,23 +36,30 @@ pub enum BoFault
     // The total budget is smaller than the first delay, so the policy
     // gives up before it ever waits.
     BoBudgetBelowFirstDelay(budget_millis: Int, first_millis: Int)
-    // A decorrelated-jitter policy has no maximum delay.  The
-    // decorrelated form grows from the LAST delay rather than from the
-    // attempt number, and without a ceiling it has no bound at all.
+    // A decorrelated policy has no maximum delay.  The decorrelated
+    // form grows from the last delay rather than from the attempt
+    // number, and without a ceiling it has no bound.
     BoDecorrelatedNeedsMaxDelay
 
-// `BoFault` is an `Error`, which is what lets `Result<T, BoFault>`
-// exist at all.
+// `BoFault` is an `Error`, so it can stand in `Result<T, BoFault>`.
 impl Error for BoFault
     // The one-line message, naming the field and the number written in
     // it.
-    //
-    // Panics with `not implemented` until the bodies land.
     fn message(self) -> Str
-        todo("backoff-nv.BoFault.message")
+        match self
+            BoBaseDelayNotPositive(ms)             => "the base delay is ${ms} ms and must be above zero"
+            BoFactorNotGreaterThanOne(factor)      =>
+                "the growth factor is ${factor} and must be above 1 for the delay to grow"
+            BoMaxDelayBelowBase(max, base)         => "the maximum delay ${max} ms is below the base delay ${base} ms"
+            BoAttemptLimitNegative(n)              => "the attempt limit is ${n}; 0 means no limit"
+            BoBudgetBelowFirstDelay(budget, first) =>
+                "the budget ${budget} ms is below the first delay ${first} ms"
+            BoDecorrelatedNeedsMaxDelay            => "a decorrelated policy needs a maximum delay"
 
 // A short stable code for a log: `"base_delay_not_positive"`,
-// `"factor_not_greater_than_one"`, and so on.
+// `"factor_not_greater_than_one"`, `"max_delay_below_base"`,
+// `"attempt_limit_negative"`, `"budget_below_first_delay"` and
+// `"decorrelated_needs_max_delay"`.
 //
 // ```novo
 // use bofault
@@ -63,4 +68,10 @@ impl Error for BoFault
 //     println(bofault.code(BoDecorrelatedNeedsMaxDelay))
 // ```
 pub fn code(f: BoFault) -> Str
-    todo("backoff-nv.bofault.code")
+    match f
+        BoBaseDelayNotPositive(_)     => "base_delay_not_positive"
+        BoFactorNotGreaterThanOne(_)  => "factor_not_greater_than_one"
+        BoMaxDelayBelowBase(_, _)     => "max_delay_below_base"
+        BoAttemptLimitNegative(_)     => "attempt_limit_negative"
+        BoBudgetBelowFirstDelay(_, _) => "budget_below_first_delay"
+        BoDecorrelatedNeedsMaxDelay   => "decorrelated_needs_max_delay"
